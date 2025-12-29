@@ -486,37 +486,61 @@ async def get_chunks_stats(
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
-@app.delete("/delete_book/", response_model=DeleteBookResponse)
+# @app.delete("/delete_book/", response_model=DeleteBookResponse)
+# # async def delete_book_from_index(pdf_name: str = Body(...)):
+# async def delete_book_from_index(
+#     pdf_name: str = Form(...),
+#     user_id: str = Header(..., alias="X-User-ID")
+# ):
+#     """Delete all chunks associated with a specific PDF from Qdrant."""
+#     try:
+#         # Validate user_id
+#         try:
+#             user_id = get_user_id_from_request(user_id)
+#         except ValueError as e:
+#             raise HTTPException(status_code=400, detail=str(e))
+        
+#         # pdf_name = request.pdf_name
+        
+#         # Delete from Qdrant
+#         delete_chunks_by_pdf(
+#             client=qdrant_client,
+#             pdf_name=pdf_name,
+#             user_id=user_id
+#         )
+        
+#         logger.info(f"Deleted book '{pdf_name}' for user {user_id}")
+#         return DeleteBookResponse(
+#             success=True,
+#             message=f"Deleted all chunks for PDF: {pdf_name}"
+#         )
+        
+#     except Exception as e:
+#         logger.error(f"Error deleting book from index: {e}", exc_info=True)
+#         raise HTTPException(status_code=500, detail=f"Failed to delete from index: {str(e)}")
+@app.delete("/delete_book/{pdf_name}", response_model=DeleteBookResponse)
 async def delete_book_from_index(
-    request: DeleteBookRequest = Body(...),
+    pdf_name: str,
     user_id: str = Header(..., alias="X-User-ID")
 ):
-    """Delete all chunks associated with a specific PDF from Qdrant."""
     try:
-        # Validate user_id
-        try:
-            user_id = get_user_id_from_request(user_id)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        
-        pdf_name = request.pdf_name
-        
-        # Delete from Qdrant
+        user_id = get_user_id_from_request(user_id)
+
         delete_chunks_by_pdf(
             client=qdrant_client,
             pdf_name=pdf_name,
             user_id=user_id
         )
-        
+
         logger.info(f"Deleted book '{pdf_name}' for user {user_id}")
         return DeleteBookResponse(
             success=True,
             message=f"Deleted all chunks for PDF: {pdf_name}"
         )
-        
+
     except Exception as e:
         logger.error(f"Error deleting book from index: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to delete from index: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/health/")
