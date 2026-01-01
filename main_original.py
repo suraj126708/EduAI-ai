@@ -20,7 +20,7 @@ from models import (
 )
 from services.pdf_processing import process_pdf
 from services.vector_store import upload_chunks_to_qdrant, get_chunks_by_filter, delete_chunks_by_pdf
-from services.exam_generator import generate_multiple_papers_with_summaries, process_paper_visuals, generate_realistic_image, generate_svg_visual
+from services.exam_generator import generate_multiple_papers_with_summaries
 from services.grading import extract_contents_from_pdf, evaluate_answers
 from dependencies import get_embeddings
 
@@ -267,19 +267,6 @@ async def generate_question_paper(
                 message="No papers were generated. Please check the request data and try again."
             )
         
-        # 2. Generate Visuals (The Artist) - NEW STEP
-        final_papers = []
-        for paper in exam_papers:
-            # This injects 'image_data' into questions that need it
-            enhanced_paper = process_paper_visuals(paper)
-            final_papers.append(enhanced_paper)
-
-        logger.info(f"Successfully generated {len(final_papers)} question paper(s)")
-        return {
-            "success": True,
-            "question_paper": final_papers
-        }
-        
         logger.info(f"Successfully generated {len(exam_papers)} question paper(s) for user {user_id}")
         return GeneratePaperResponse(
             success=True,
@@ -343,34 +330,6 @@ async def evaluate_answer_paper(
             except:
                 pass
 
-
-@app.post("/regenerate_image/")
-async def regenerate_image(
-    question: str = Form(...),
-    prompt: str = Form(...),
-    type: str = Form(...),
-):
-    logger.info(f"Regenerating the image of type '{type}' for '{question}'")
-
-    try:
-        if type == "svg":
-            result = generate_svg_visual(prompt)
-        else:
-            result = generate_realistic_image(prompt)
-            
-        if result and "content" in result:
-            # Wrap the result to match the Express server's expectations
-            return {
-                "success": True,
-                "imageUrl": result["content"],
-                "type": result["type"]
-            }
-        
-        raise HTTPException(status_code=500, detail="AI Service returned empty data")
-        
-    except Exception as e:
-        logger.error(f"Error in regenerate_image: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/chunks/", response_model=ChunkResponse)
 async def get_chunks(
@@ -593,4 +552,3 @@ async def health_check():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
