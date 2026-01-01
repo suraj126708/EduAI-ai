@@ -9,7 +9,7 @@ import logging
 import asyncio
 import concurrent.futures
 import io
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Generator, Optional, Any
 from PIL import Image
 from pdf2image import convert_from_path
 from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
@@ -17,6 +17,7 @@ from langchain_core.documents import Document
 from google.genai import types
 from dependencies import get_gemini_client
 from utils import clean_json_string, parse_xml_to_json, parse_elements_from_xml
+from services.vector_store import upload_chunks_to_qdrant
 
 logger = logging.getLogger(__name__)
 
@@ -939,10 +940,28 @@ def create_smart_chunks(subject_data: dict, elements: List[Dict], chapters: List
     logger.info(f"Created {len(chunks)} chunks from {len(sorted_pages)} pages.")
     return chunks
 
-def process_pdf(subject_data: dict, file_path: str, max_toc_pages: int = 15, chapters: List[Dict] = None) -> Tuple[List[Dict], List[Document]]:
+def process_pdf(
+    subject_data: dict, 
+    file_path: str, 
+    max_toc_pages: int = 15, 
+    chapters: List[Dict] = None,
+    qdrant_client: Optional[Any] = None,
+    embeddings: Optional[Any] = None,
+    user_id: Optional[str] = None
+) -> Generator[str, None, None]:
     """
     Process PDF - extracts chapters and all content from the book.
-    Ensures that processing does not return early and completes all phases.
+    Generator that yields JSON progress updates at key milestones.
+    
+    Yields:
+        JSON strings with progress updates:
+        - {"progress": 33, "status": "Chapters extracted"}
+        - {"progress": 66, "status": "Elements extracted"}
+        - {"progress": 85, "status": "Vector storage done"} (if qdrant_client provided)
+        - {"progress": 100, "status": "Success", "data": result}
+    
+    Note:
+        This is a generator function that yields JSON strings. Consume all yields to get the final result.
     """
     if not subject_data or not isinstance(subject_data, dict):
         raise ValueError("subject_data must be a non-empty dictionary")
@@ -1000,6 +1019,9 @@ def process_pdf(subject_data: dict, file_path: str, max_toc_pages: int = 15, cha
                 for p in range(1, total_pages + 1):
                     if p not in page_chapter_map:
                         page_chapter_map[p] = "General"
+        
+        # Yield progress: 33% - Chapters extracted
+        yield json.dumps({"progress": 33, "status": "Chapters extracted"})
 
         # ==================================================================================
         # PHASE 2: Parallel Content Extraction
@@ -1012,10 +1034,22 @@ def process_pdf(subject_data: dict, file_path: str, max_toc_pages: int = 15, cha
         
         if not elements:
             logger.error("CRITICAL: Phase 2 returned no elements. Chunking will be skipped.")
-            # We still return chapters, but chunks will be empty
-            return chapters, []
+            # Yield final result with empty chunks
+            result = {
+                "progress": 100,
+                "status": "Success",
+                "data": {
+                    "chapters": chapters,
+                    "chunks": 0
+                }
+            }
+            yield json.dumps(result)
+            return
 
         logger.info(f"Phase 2 Complete: Extracted {len(elements)} elements")
+        
+        # Yield progress: 66% - Elements extracted
+        yield json.dumps({"progress": 66, "status": "Elements extracted"})
 
         # ==================================================================================
         # PHASE 3: Smart Chunking
@@ -1027,10 +1061,42 @@ def process_pdf(subject_data: dict, file_path: str, max_toc_pages: int = 15, cha
         logger.info(f"Total processing time: {elapsed_time:.2f} seconds ({elapsed_time/60:.2f} minutes)")
         logger.info(f"Phase 3 Complete: Created {len(chunks)} chunks from {len(chapters)} chapters")
         
-        # Final Return - Only happens after all 3 phases
-        return chapters, chunks
+        # Upload to Qdrant if dependencies provided
+        if qdrant_client and embeddings and user_id:
+            try:
+                upload_chunks_to_qdrant(
+                    client=qdrant_client,
+                    chunks=chunks,
+                    embeddings=embeddings,
+                    user_id=user_id
+                )
+                logger.info(f"Successfully uploaded {len(chunks)} chunks to Qdrant for user {user_id}")
+                
+                # Yield progress: 85% - Vector storage done
+                yield json.dumps({"progress": 85, "status": "Vector storage done"})
+            except Exception as e:
+                logger.error(f"Error uploading chunks to Qdrant: {e}", exc_info=True)
+                # Continue even if upload fails
+        
+        # Yield final result: 100% - Success
+        result = {
+            "progress": 100,
+            "status": "Success",
+            "data": {
+                "chapters": chapters,
+                "chunks": len(chunks)
+            }
+        }
+        yield json.dumps(result)
 
     except Exception as e:
         elapsed_time = time.time() - start_time
         logger.error(f"Error processing PDF after {elapsed_time:.2f} seconds: {e}", exc_info=True)
+        # Yield error status
+        error_result = {
+            "progress": 100,
+            "status": "Error",
+            "message": str(e)
+        }
+        yield json.dumps(error_result)
         raise
