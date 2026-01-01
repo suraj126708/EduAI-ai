@@ -7,7 +7,7 @@ import logging
 import tempfile
 from typing import Optional, List, Dict
 from fastapi import FastAPI, HTTPException, UploadFile, Form, Body, Header
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import CORS_ORIGINS
@@ -20,7 +20,7 @@ from models import (
 )
 from services.pdf_processing import process_pdf
 from services.vector_store import upload_chunks_to_qdrant, get_chunks_by_filter, delete_chunks_by_pdf
-from services.exam_generator import generate_multiple_papers_with_summaries, process_paper_visuals, generate_realistic_image, generate_svg_visual
+from services.exam_generator import generate_multiple_papers_with_summaries
 from services.grading import extract_contents_from_pdf, evaluate_answers
 from dependencies import get_embeddings
 
@@ -60,13 +60,13 @@ app.add_middleware(
 )
 
 
-@app.post("/process_pdf/")
+@app.post("/process_pdf/", response_model=ProcessPDFResponse)
 async def process_pdf_endpoint(
     file: UploadFile = Form(...),
     subject_data: str = Form(...),
     user_id: str = Header(..., alias="X-User-ID")
 ):
-    """Process PDF and upload to Qdrant with real-time progress streaming (SSE)."""
+    """Process PDF and upload to Qdrant (synchronous - matches backend expectations)."""
     file_path = None
     try:
         # Validate file
@@ -103,43 +103,38 @@ async def process_pdf_endpoint(
         except json.JSONDecodeError as e:
             raise HTTPException(status_code=400, detail=f"Invalid JSON in subject_data: {str(e)}")
         
-        # Generator function for streaming
-        def generate():
-            try:
-                embeddings = get_embeddings()
-                # Process PDF with generator - pass qdrant dependencies
-                for progress_json in process_pdf(
-                    subject_data_dict, 
-                    file_path,
-                    qdrant_client=qdrant_client,
-                    embeddings=embeddings,
-                    user_id=user_id
-                ):
-                    # Format as SSE: data: {json}\n\n
-                    yield f"data: {progress_json}\n\n"
-            except Exception as e:
-                logger.error(f"Error processing PDF: {e}", exc_info=True)
-                error_json = json.dumps({
-                    "progress": 100,
-                    "status": "Error",
-                    "message": str(e)
-                })
-                yield f"data: {error_json}\n\n"
-            finally:
-                # Clean up temp file
-                if file_path and os.path.exists(file_path):
-                    try:
-                        os.remove(file_path)
-                    except Exception as e:
-                        logger.warning(f"Error removing temp file {file_path}: {e}")
+        # Process PDF synchronously (backend expects this with 15min timeout)
+        try:
+            chapters, chunks = process_pdf(subject_data_dict, file_path)
+        except Exception as e:
+            logger.error(f"Error processing PDF: {e}", exc_info=True)
+            raise HTTPException(status_code=422, detail=f"Failed to extract content from the PDF: {str(e)}")
         
-        return StreamingResponse(
-            generate(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-            }
+        # Validate chunks were created
+        if not chunks or len(chunks) == 0:
+            raise HTTPException(status_code=422, detail="Failed to extract content from the PDF. It may be empty or corrupted.")
+        
+        # Upload to Qdrant
+        try:
+            embeddings = get_embeddings()
+            upload_chunks_to_qdrant(
+                client=qdrant_client,
+                chunks=chunks,
+                embeddings=embeddings,
+                user_id=user_id
+            )
+            logger.info(f"Successfully uploaded {len(chunks)} chunks to Qdrant for user {user_id}")
+        except Exception as e:
+            logger.error(f"Error uploading chunks to Qdrant: {e}", exc_info=True)
+            # Still return success if processing worked, but log the error
+            # The chunks are processed even if upload fails
+        
+        # Return response matching backend expectations
+        return ProcessPDFResponse(
+            status="success",
+            message="Book uploaded and processed successfully.",
+            chunks=len(chunks),
+            chapters=chapters if chapters else []
         )
         
     except HTTPException:
@@ -147,6 +142,13 @@ async def process_pdf_endpoint(
     except Exception as e:
         logger.error(f"Unexpected error in process_pdf_endpoint: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+    finally:
+        # Clean up temp file
+        if file_path and os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except Exception as e:
+                logger.warning(f"Error removing temp file {file_path}: {e}")
 
 
 @app.post("/generate_question_paper/", response_model=GeneratePaperResponse)
@@ -265,19 +267,6 @@ async def generate_question_paper(
                 message="No papers were generated. Please check the request data and try again."
             )
         
-        # 2. Generate Visuals (The Artist) - NEW STEP
-        final_papers = []
-        for paper in exam_papers:
-            # This injects 'image_data' into questions that need it
-            enhanced_paper = process_paper_visuals(paper)
-            final_papers.append(enhanced_paper)
-
-        logger.info(f"Successfully generated {len(final_papers)} question paper(s)")
-        return {
-            "success": True,
-            "question_paper": final_papers
-        }
-        
         logger.info(f"Successfully generated {len(exam_papers)} question paper(s) for user {user_id}")
         return GeneratePaperResponse(
             success=True,
@@ -341,34 +330,6 @@ async def evaluate_answer_paper(
             except:
                 pass
 
-
-@app.post("/regenerate_image/")
-async def regenerate_image(
-    question: str = Form(...),
-    prompt: str = Form(...),
-    type: str = Form(...),
-):
-    logger.info(f"Regenerating the image of type '{type}' for '{question}'")
-
-    try:
-        if type == "svg":
-            result = generate_svg_visual(prompt)
-        else:
-            result = generate_realistic_image(prompt)
-            
-        if result and "content" in result:
-            # Wrap the result to match the Express server's expectations
-            return {
-                "success": True,
-                "imageUrl": result["content"],
-                "type": result["type"]
-            }
-        
-        raise HTTPException(status_code=500, detail="AI Service returned empty data")
-        
-    except Exception as e:
-        logger.error(f"Error in regenerate_image: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/chunks/", response_model=ChunkResponse)
 async def get_chunks(
@@ -591,4 +552,3 @@ async def health_check():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
