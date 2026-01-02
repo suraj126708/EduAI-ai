@@ -56,7 +56,7 @@ def get_qdrant_client() -> QdrantClient:
 def ensure_collection_exists(client: QdrantClient, collection_name: str = COLLECTION_NAME) -> None:
     """
     Ensure the Qdrant collection exists. Create it if it doesn't.
-    Also ensures user_id payload index exists for efficient filtering.
+    Also ensures user_id, pdf_name, and chapter_no payload indexes exist for efficient filtering.
     
     Args:
         client: QdrantClient instance
@@ -82,28 +82,35 @@ def ensure_collection_exists(client: QdrantClient, collection_name: str = COLLEC
         else:
             logger.debug(f"Collection '{collection_name}' already exists")
         
-        # Ensure user_id is indexed for filtering (required for efficient queries)
+        # Ensure required indexes exist for filtering
+        # These indexes are required for efficient queries in Qdrant
+        indexes_to_create = [
+            ("user_id", "user isolation"),
+            ("pdf_name", "PDF filtering"),
+            ("chapter_no", "chapter filtering"),
+        ]
+        
         try:
-            # Check if index already exists by trying to get collection info
+            # Check if collection exists by trying to get collection info
             collection_info = client.get_collection(collection_name)
-            # If we get here, collection exists - now check/create index
+            # If we get here, collection exists - now create indexes
             
-            # Try to create the index (will fail silently if it already exists)
-            try:
-                client.create_payload_index(
-                    collection_name=collection_name,
-                    field_name="user_id",
-                    field_schema=PayloadSchemaType.KEYWORD
-                )
-                logger.info(f"Created payload index for 'user_id' in collection '{collection_name}'")
-            except Exception as index_error:
-                # Index might already exist, which is fine
-                if "already exists" in str(index_error).lower() or "duplicate" in str(index_error).lower():
-                    logger.debug(f"Payload index for 'user_id' already exists in collection '{collection_name}'")
-                else:
-                    logger.warning(f"Could not create payload index for 'user_id': {index_error}")
+            for field_name, description in indexes_to_create:
+                try:
+                    client.create_payload_index(
+                        collection_name=collection_name,
+                        field_name=field_name,
+                        field_schema=PayloadSchemaType.KEYWORD
+                    )
+                    logger.info(f"Created payload index for '{field_name}' ({description}) in collection '{collection_name}'")
+                except Exception as index_error:
+                    # Index might already exist, which is fine
+                    if "already exists" in str(index_error).lower() or "duplicate" in str(index_error).lower():
+                        logger.debug(f"Payload index for '{field_name}' already exists in collection '{collection_name}'")
+                    else:
+                        logger.warning(f"Could not create payload index for '{field_name}': {index_error}")
         except Exception as e:
-            logger.warning(f"Error ensuring user_id index exists: {e}")
+            logger.warning(f"Error ensuring indexes exist: {e}")
             # Don't raise - index creation is best effort, filtering will still work but may be slower
             
     except Exception as e:
