@@ -9,7 +9,7 @@ from typing import Optional, List, Dict
 from fastapi import FastAPI, HTTPException, UploadFile, Form, Body, Header
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-
+import google.generativeai as genai 
 from config import CORS_ORIGINS
 from database import get_qdrant_client, ensure_collection_exists
 from dependencies import get_gemini_client, get_user_id_from_request
@@ -18,6 +18,8 @@ from models import (
     EvaluateAnswerRequest, EvaluateAnswerResponse, DeleteBookRequest,
     DeleteBookResponse, ChunkResponse, ChunkStatsResponse
 )
+from models import SemesterReportRequest
+from services.pdf_processing import pil_to_part, safe_vertex_generate
 from services.pdf_processing import process_pdf
 from services.vector_store import upload_chunks_to_qdrant, get_chunks_by_filter, delete_chunks_by_pdf
 from services.exam_generator import generate_multiple_papers_with_summaries, process_paper_visuals, generate_realistic_image, generate_svg_visual
@@ -581,6 +583,91 @@ async def delete_book_from_index(
         logger.error(f"Error deleting book from index: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/generate_semester_report/")
+async def generate_semester_report_endpoint(request: SemesterReportRequest):
+    """
+    Generates a comprehensive semester report based on multiple exam evaluations.
+    """
+    try:
+        logger.info(f"Generating semester report for {request.student_name}")
+        
+        # Calculate basic stats first to help the LLM
+        total_exams = len(request.evaluations)
+        if total_exams == 0:
+             return JSONResponse(content={"error": "No evaluations provided"}, status_code=400)
+
+        # Prepare context string
+        eval_context = ""
+        for idx, ev in enumerate(request.evaluations):
+            percentage = (ev.get('marks_obtained', 0) / ev.get('total_marks', 1)) * 100
+            eval_context += f"""
+            Exam {idx+1}:
+            - Subject: {ev.get('subject')}
+            - Exam Type: {ev.get('exam_type')}
+            - Date: {ev.get('date')}
+            - Score: {ev.get('marks_obtained')}/{ev.get('total_marks')} ({percentage:.1f}%)
+            """
+
+        prompt = f"""
+        You are an expert academic analyst generating a "Semester Performance Report" for a student named {request.student_name} (Class {request.class_grade}).
+        
+        Below is the student's performance record for the {request.semester} semester ({request.academic_year}):
+        {eval_context}
+
+        ### YOUR TASK:
+        Analyze this data and generate a structured report similar to professional employability reports (like AMCAT), but focused on school academics.
+        
+        ### OUTPUT SECTIONS REQUIRED (STRICT JSON):
+        1. **summary**: A professional paragraph (approx 50 words) summarizing the student's overall performance, consistency, and major achievements.
+        2. **subject_analysis**: A list of objects, one for each unique subject.
+           - subject: Name
+           - score: Average percentage (0-100)
+           - proficiency: "Basic", "Intermediate", "Advanced", or "Expert"
+           - insight: A short, personalized comment on their performance in this subject (e.g., "Demonstrates strong conceptual clarity...").
+        3. **skill_analysis**: Derive 4-5 core academic skills based on the subjects (e.g., "Analytical Thinking" from Math/Science, "Language Comprehension" from English/History).
+           - skill: Name
+           - score: Estimated score (0-100) based on relevant subject marks.
+        4. **recommendations**: 3-4 actionable bullet points for improvement.
+        5. **highlights**: 2-3 specific areas where the student excelled.
+
+        ### JSON SCHEMA:
+        {{
+          "summary": "...",
+          "subject_analysis": [
+            {{ "subject": "Math", "score": 85, "proficiency": "Advanced", "insight": "..." }}
+          ],
+          "skill_analysis": [
+            {{ "skill": "Logical Reasoning", "score": 78 }}
+          ],
+          "recommendations": ["...", "..."],
+          "highlights": ["...", "..."]
+        }}
+        
+        Return ONLY valid JSON. No markdown formatting.
+        """
+        # import google.generativeai as genai
+
+        genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))        
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        response = safe_vertex_generate([prompt])
+        
+        if not response or not response.candidates:
+            raise ValueError("AI failed to generate report")
+
+        text = response.candidates[0].content.parts[0].text.strip()
+        
+        # Clean JSON
+        import re
+        if "```" in text:
+            text = re.sub(r"```(?:json)?|```", "", text).strip()
+            
+        report_data = json.loads(text)
+        
+        return JSONResponse(content={"success": True, "report": report_data})
+
+    except Exception as e:
+        logger.error(f"Semester report error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health/")
 async def health_check():

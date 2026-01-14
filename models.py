@@ -82,6 +82,14 @@ class EvaluateAnswerResponse(BaseModel):
     sections: List[Dict[str, Any]]
     chapter_summary: Optional[Dict[str, Any]] = None
 
+class SemesterReportRequest(BaseModel):
+    student_name: str
+    class_grade: str
+    semester: str
+    academic_year: str
+    evaluations: List[Dict] # List of { subject, marks_obtained, total_marks, exam_type, date }
+
+
 
 class DeleteBookRequest(BaseModel):
     """Request to delete a book from index."""
